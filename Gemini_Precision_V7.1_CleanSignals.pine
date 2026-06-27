@@ -1,0 +1,121 @@
+//@version=6
+indicator(title="Gemini Precision Filter V7.1 - Clean Signals", shorttitle="GMP-V7.1", overlay=true, max_labels_count=500)
+
+// --- Inputs ---
+src           = input.source(close, title="Source")
+length        = input.int(18, "Baseline Period") 
+mult          = input.float(1.5, "Signal Buffer") 
+exhaust_limit = input.int(12, "Trend Maturity (E)")
+cooldown_len  = input.int(2, "Re-Entry Cooldown (bars)", minval=0, maxval=10,
+                 tooltip="Bars to block new entries after a close. Eliminates whipsaw B→BC→B clusters.")
+
+// --- Core Logic ---
+ema1 = ta.ema(src, length)
+ema2 = ta.ema(ema1, length)
+zero_lag = ema1 + (ema1 - ema2)
+
+atr_val   = ta.atr(length)
+upper_gate = zero_lag + (atr_val * mult * 0.2)
+lower_gate = zero_lag - (atr_val * mult * 0.2)
+
+// --- State Management ---
+var int trend_state = 0
+var int bar_count   = 0
+var int cooldown    = 0   // bars remaining before a new entry is allowed
+
+// Decrement cooldown each bar
+if cooldown > 0
+    cooldown -= 1
+
+// Entry triggers are BLOCKED while cooldown is active
+bool bull_trigger = src > upper_gate and zero_lag > zero_lag[1] and cooldown == 0
+bool bear_trigger = src < lower_gate and zero_lag < zero_lag[1] and cooldown == 0
+
+if trend_state <= 0 and bull_trigger
+    trend_state := 1
+    bar_count   := 1
+else if trend_state >= 0 and bear_trigger
+    trend_state := -1
+    bar_count   := 1
+else if trend_state != 0
+    bar_count += 1
+
+// --- Close Conditions ---
+bool long_close  = trend_state == 1  and (src < zero_lag or bar_count >= exhaust_limit)
+bool short_close = trend_state == -1 and (src > zero_lag or bar_count >= exhaust_limit)
+
+if long_close or short_close
+    trend_state := 0
+    cooldown    := cooldown_len   // start cooldown after every close
+
+// --- Signal Prep ---
+bool buy_signal  = trend_state == 1  and trend_state[1] != 1
+bool sell_signal = trend_state == -1 and trend_state[1] != -1
+price_str        = str.tostring(close, format.mintick)
+
+// =============================================================================
+// --- Same-Bar Label Merge Engine ---
+// Tracks the last label per side. If a new signal fires on the SAME bar_index
+// (common on HTF candles where multiple LTF bars share one candle slot),
+// the existing label is UPDATED instead of a new one being spawned.
+// =============================================================================
+
+var label top_lbl     = na
+var int   top_lbl_bar = -1
+var label bot_lbl     = na
+var int   bot_lbl_bar = -1
+
+// --- TOP SIDE: Short Entries & Long Exits ---
+if sell_signal or long_close
+    string new_token = sell_signal and long_close ? "S\nBC" : sell_signal ? "S" : "BC"
+    color  new_col   = sell_signal ? #ff00ff : color.new(color.red, 0)
+
+    if top_lbl_bar == bar_index and not na(top_lbl)
+        // SAME BAR → merge tokens into existing label
+        old_txt    = label.get_text(top_lbl)
+        has_s      = str.contains(old_txt, "S")  or str.contains(new_token, "S")
+        has_bc     = str.contains(old_txt, "BC") or str.contains(new_token, "BC")
+        merged     = (has_s and has_bc) ? "S\nBC\n" + price_str :
+                     has_s              ? "S\n"  + price_str     :
+                                          "BC\n" + price_str
+        merged_col = (has_s and has_bc) ? #ff00ff :
+                     has_s              ? #ff00ff :
+                                          color.new(color.red, 0)
+        label.set_text(top_lbl,  merged)
+        label.set_color(top_lbl, merged_col)
+    else
+        // NEW BAR → create fresh label
+        top_lbl     := label.new(bar_index, high, text=new_token + "\n" + price_str,
+                         color=new_col, textcolor=color.white,
+                         style=label.style_label_down, yloc=yloc.abovebar, size=size.small)
+        top_lbl_bar := bar_index
+
+// --- BOTTOM SIDE: Long Entries & Short Exits ---
+if buy_signal or short_close
+    string new_token = buy_signal and short_close ? "B\nSC" : buy_signal ? "B" : "SC"
+    color  new_col   = buy_signal ? color.blue : color.new(color.green, 0)
+
+    if bot_lbl_bar == bar_index and not na(bot_lbl)
+        // SAME BAR → merge tokens into existing label
+        old_txt    = label.get_text(bot_lbl)
+        has_b      = str.contains(old_txt, "B")  or str.contains(new_token, "B")
+        has_sc     = str.contains(old_txt, "SC") or str.contains(new_token, "SC")
+        merged     = (has_b and has_sc) ? "B\nSC\n" + price_str :
+                     has_b              ? "B\n"  + price_str     :
+                                          "SC\n" + price_str
+        merged_col = (has_b and has_sc) ? color.new(color.green, 0) :
+                     has_b              ? color.blue                 :
+                                          color.new(color.green, 0)
+        label.set_text(bot_lbl,  merged)
+        label.set_color(bot_lbl, merged_col)
+    else
+        // NEW BAR → create fresh label
+        bot_lbl     := label.new(bar_index, low, text=new_token + "\n" + price_str,
+                         color=new_col, textcolor=color.white,
+                         style=label.style_label_up, yloc=yloc.belowbar, size=size.small)
+        bot_lbl_bar := bar_index
+
+// --- Visual Baseline ---
+color trend_color = trend_state == 1 ? #0052ff : trend_state == -1 ? #ff00ff : #ff9800
+plot(zero_lag, color=trend_color, linewidth=3, title="Iron Baseline")
+plotchar(bar_count >= exhaust_limit and trend_state != 0, char='E', location=location.top, color=trend_color, size=size.tiny)
