@@ -1,0 +1,146 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BOSWaves
+
+//@version=6
+indicator("Supertrend Extensions [BOSWaves]",overlay = true,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, max_bars_back = 5000)
+
+// ┌────────────────────────────── BOSWaves ─ Inputs ─────────────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+const string gST   = "Supertrend"
+const string gDev  = "Deviation Levels"
+const string gProf = "Distribution Profile"
+const string gVis  = "Display"
+
+float i_mult   = input.float(5.0, "ATR Multiplier", minval = 0.5, maxval = 10.0, step = 0.5, group = gST,
+     tooltip = "Controls how wide the Supertrend band is relative to volatility (ATR). Higher values produce fewer trend flips and a wider band — better for catching larger moves but slower to react. Lower values flip more frequently and track price closer — better for active markets.")
+int   i_atrLen = input.int(14, "ATR Length", minval = 1, maxval = 50, group = gST,
+     tooltip = "Number of bars used to calculate Average True Range (ATR). Shorter lengths react faster to recent volatility but produce noisier readings. Longer lengths smooth out the ATR and create a more stable band. 14 is the widely-used default.")
+
+float i_devMult = input.float(2.7, "Deviation Size", minval = 0.5, maxval = 5.0, step = 0.1, group = gDev,
+     tooltip = "Scales the spacing between deviation levels. Each level is placed at a multiple of the average candle range (SMA of high-low over 100 bars) from the flip price. Higher values spread levels further apart — useful on higher timeframes or more volatile instruments.")
+int   i_devCnt  = input.int(4, "Deviation Count", minval = 1, maxval = 6, group = gDev,
+     tooltip = "Number of price extension levels projected from each trend flip. Levels act as potential targets or areas of interest as price extends from the flip. When a level is crossed, it converts to a dashed line and displays the crossing candle's volume.")
+
+bool  i_showSig  = input.bool(true, "Show Signals", group = gVis,
+     tooltip = "Displays a label at each trend flip with the flip price. Bullish flips show a ▲ below the bar; bearish flips show a ▼ above the bar.")
+bool  i_paintBar = input.bool(true, "Color Candles", group = gVis,
+     tooltip = "Colors each candle based on the current trend direction. Intensity scales with relative volume — brighter candles indicate above-average volume for the current move.")
+color i_bullCol  = input.color(#00ff88, "Bullish", inline = "c", group = gVis,
+     tooltip = "Color applied to bullish trend candles, the Supertrend line, and flip signals when price is above the band.")
+color i_bearCol  = input.color(#ff3366, "Bearish", inline = "c", group = gVis,
+     tooltip = "Color applied to bearish trend candles, the Supertrend line, and flip signals when price is below the band.")
+
+// ┌────────────────────────────── BOSWaves ─ Supertrend ─────────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+float atr      = ta.atr(i_atrLen)
+float rawUpper = hl2 + atr * i_mult
+float rawLower = hl2 - atr * i_mult
+
+var float trailUpper = na
+var float trailLower = na
+
+trailLower := not na(trailLower[1]) and close[1] > trailLower[1] ? math.max(rawLower, trailLower[1]) : rawLower
+trailUpper := not na(trailUpper[1]) and close[1] < trailUpper[1] ? math.min(rawUpper, trailUpper[1]) : rawUpper
+
+var int trend = 0
+if close > trailUpper
+    trend := 1
+if close < trailLower
+    trend := -1
+
+float stLine    = trend == 1 ? trailLower : trailUpper
+bool  trendFlip = trend != trend[1] and trend[1] != 0
+bool  bullFlip  = trend == 1 and trend[1] == -1
+bool  bearFlip  = trend == -1 and trend[1] == 1
+
+color trendCol = trend == 1 ? i_bullCol : i_bearCol
+
+// Track trend start
+var int trendStart = na
+if trendFlip
+    trendStart := bar_index
+
+int lookback = bar_index - nz(trendStart, bar_index)
+
+// ┌────────────────────────────── BOSWaves ─ Deviation Levels ───────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+float devDist = ta.sma(high - low, 100) * i_devMult
+
+var devLines  = array.new<line>()
+var devLabels = array.new<label>()
+
+if trendFlip
+    // Cleanup old levels
+    for ln in devLines
+        ln.delete()
+    devLines.clear()
+    for lb in devLabels
+        lb.delete()
+    devLabels.clear()
+
+    // Draw new levels
+    for i = 1 to i_devCnt
+        float y = trend == 1 ? close + devDist * i : close - devDist * i
+
+        devLines.push(line.new(bar_index, y, bar_index, y,
+             color = color.new(chart.fg_color, 50), width = 2))
+        devLabels.push(label.new(bar_index, y, str.tostring(i),
+             style = label.style_label_right,
+             color = color.new(color.black, 100),
+             textcolor = chart.fg_color,
+             size = size.normal))
+
+// Extend and check if crossed
+if devLines.size() > 0
+    for i = devLines.size() - 1 to 0
+        line ln  = devLines.get(i)
+        label lb = devLabels.get(i)
+        float lvl = ln.get_y1()
+
+        ln.set_x2(bar_index)
+
+        // Crossed — show volume and dash
+        if trend == 1 and high > lvl and high[1] <= lvl
+            lb.set_text(str.tostring(volume, format.volume))
+            ln.set_x2(bar_index)
+            ln.set_style(line.style_dashed)
+            ln.set_color(color.new(chart.fg_color, 70))
+            devLines.remove(i)
+            devLabels.remove(i)
+
+        if trend == -1 and low < lvl and low[1] >= lvl
+            lb.set_text(str.tostring(volume, format.volume))
+            ln.set_x2(bar_index)
+            ln.set_style(line.style_dashed)
+            ln.set_color(color.new(chart.fg_color, 70))
+            devLines.remove(i)
+            devLabels.remove(i)
+
+// ┌────────────────────────────── BOSWaves ─ Plot Supertrend ────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+pST    = plot(not trendFlip ? stLine : na, "Supertrend", color.new(trendCol, 15), 2, plot.style_linebr)
+pPrice = plot(hl2, display = display.none, editable = false)
+fill(pST, pPrice, hl2, stLine, color(na), color.new(trendCol, 80))
+
+// Candle coloring with volume intensity
+float volNorm = ta.stdev(volume, 200)
+float nVol    = volNorm > 0 ? math.min(4., volume / volNorm) : 1.
+color candleCol = color.from_gradient(nVol, 0, 4, color.new(trendCol, 70), trendCol)
+barcolor(i_paintBar ? candleCol : na)
+
+// Signals
+if i_showSig and bullFlip
+    label.new(bar_index, stLine, "▲\n" + str.tostring(close, format.mintick),
+         style = label.style_label_up, textcolor = i_bullCol,
+         color = color.new(color.black, 100), size = size.normal)
+
+if i_showSig and bearFlip
+    label.new(bar_index, stLine, str.tostring(close, format.mintick) + "\n▼",
+         style = label.style_label_down, textcolor = i_bearCol,
+         color = color.new(color.black, 100), size = size.normal)
+
+// ┌────────────────────────────── BOSWaves ─ Alerts ─────────────────────────────────┐
+// └──────────────────────────────────────────────────────────────────────────────────┘
+alertcondition(bullFlip, "Bullish Flip", "Supertrend flipped bullish on {{ticker}}")
+alertcondition(bearFlip, "Bearish Flip", "Supertrend flipped bearish on {{ticker}}")
